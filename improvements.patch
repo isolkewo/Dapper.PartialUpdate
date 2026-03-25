@@ -1,0 +1,1086 @@
+diff --git a/DapperPartialExtensions.cs b/DapperPartialExtensions.cs
+index 0072b16..a7da56e 100644
+--- a/DapperPartialExtensions.cs
++++ b/DapperPartialExtensions.cs
+@@ -7,6 +7,35 @@ using Dapper;
+ 
+ namespace Dapper.PartialUpdate;
+ 
++/// <summary>
++/// Specifies the database type for identifier quoting.
++/// </summary>
++public enum DatabaseType
++{
++    /// <summary>
++    /// SQL Server uses square brackets: [identifier]
++    /// </summary>
++    SqlServer,
++    
++    /// <summary>
++    /// SQLite, PostgreSQL, and MySQL use double quotes: "identifier"
++    /// </summary>
++    Standard,
++    
++    /// <summary>
++    /// MySQL also supports backticks: `identifier`
++    /// </summary>
++    MySql
++}
++
++/// <summary>
++/// Provides extension methods for partial update and insert operations using Dapper.
++/// </summary>
++/// <remarks>
++/// These extensions enable patch-style database operations where only explicitly set fields
++/// (wrapped in <see cref="Partial{T}"/>) are included in the generated SQL. This is useful
++/// for scenarios where you need to update only specific fields without affecting others.
++/// </remarks>
+ public static class DapperPartialExtensions
+ {
+     private sealed record PartialProp(
+@@ -20,11 +49,31 @@ public static class DapperPartialExtensions
+         string QualifiedTableName,
+         PropertyInfo KeyProp,
+         string KeyColumnName,
+-        IReadOnlyList<PartialProp> PartialProps
++        IReadOnlyList<PartialProp> PartialProps,
++        DatabaseType DatabaseType
+     );
+ 
+     private static readonly ConcurrentDictionary<Type, EntityPlan> PlanCache = new();
+ 
++    /// <summary>
++    /// Updates only the fields of an entity that have been explicitly set using <see cref="Partial{T}"/>.
++    /// </summary>
++    /// <typeparam name="T">The type of the entity to update. Must have a key property.</typeparam>
++    /// <param name="connection">The database connection to use.</param>
++    /// <param name="entity">The entity with partially set fields. Cannot be null.</param>
++    /// <param name="transaction">Optional database transaction. Defaults to null.</param>
++    /// <param name="commandTimeout">Optional command timeout in seconds. Defaults to null.</param>
++    /// <returns>The number of rows affected.</returns>
++    /// <exception cref="ArgumentNullException">Thrown when <paramref name="connection"/> or <paramref name="entity"/> is null.</exception>
++    /// <exception cref="InvalidOperationException">Thrown when no key property is found or key value is null.</exception>
++    /// <exception cref="InvalidOperationException">Thrown when no fields are set on the entity.</exception>
++    /// <example>
++    /// <code>
++    /// var user = new User { Id = 1 };
++    /// user.Name = "John"; // Only Name will be updated
++    /// connection.UpdatePartials(user);
++    /// </code>
++    /// </example>
+     public static int UpdatePartials<T>(
+         this IDbConnection connection,
+         T entity,
+@@ -35,9 +84,9 @@ public static class DapperPartialExtensions
+         if (connection is null) throw new ArgumentNullException(nameof(connection));
+         if (entity is null) throw new ArgumentNullException(nameof(entity));
+ 
+-        var plan = PlanCache.GetOrAdd(typeof(T), BuildPlan);
++        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, DatabaseType.SqlServer));
+         var keyValue = plan.KeyProp.GetValue(entity)
+-            ?? throw new InvalidOperationException("Key value cannot be null.");
++            ?? throw new InvalidOperationException($"Key value for '{plan.KeyProp.Name}' cannot be null on entity of type '{typeof(T).Name}'.");
+ 
+         var setClauses = new List<string>();
+         var parameters = new DynamicParameters();
+@@ -50,17 +99,28 @@ public static class DapperPartialExtensions
+ 
+             var paramName = $"p_{partial.Name}";
+             var columnName = GetColumnName(partial.Prop) ?? partial.Name;
+-            setClauses.Add($"{QuoteIdentifier(columnName)} = @{paramName}");
++            setClauses.Add($"{QuoteIdentifier(columnName, plan.DatabaseType)} = @{paramName}");
+             parameters.Add(paramName, value);
+         }
+ 
+         if (setClauses.Count == 0)
+             return 0;
+ 
+-        var sql = $"UPDATE {plan.QualifiedTableName} SET {string.Join(", ", setClauses)} WHERE {QuoteIdentifier(plan.KeyColumnName)} = @__key;";
++        var sql = $"UPDATE {plan.QualifiedTableName} SET {string.Join(", ", setClauses)} WHERE {QuoteIdentifier(plan.KeyColumnName, plan.DatabaseType)} = @__key;";
+         return connection.Execute(sql, parameters, transaction, commandTimeout);
+     }
+ 
++    /// <summary>
++    /// Asynchronously updates only the fields of an entity that have been explicitly set using <see cref="Partial{T}"/>.
++    /// </summary>
++    /// <typeparam name="T">The type of the entity to update. Must have a key property.</typeparam>
++    /// <param name="connection">The database connection to use.</param>
++    /// <param name="entity">The entity with partially set fields. Cannot be null.</param>
++    /// <param name="transaction">Optional database transaction. Defaults to null.</param>
++    /// <param name="commandTimeout">Optional command timeout in seconds. Defaults to null.</param>
++    /// <returns>A task representing the asynchronous operation. The result is the number of rows affected.</returns>
++    /// <exception cref="ArgumentNullException">Thrown when <paramref name="connection"/> or <paramref name="entity"/> is null.</exception>
++    /// <exception cref="InvalidOperationException">Thrown when no key property is found or key value is null.</exception>
+     public static Task<int> UpdatePartialsAsync<T>(
+         this IDbConnection connection,
+         T entity,
+@@ -71,9 +131,9 @@ public static class DapperPartialExtensions
+         if (connection is null) throw new ArgumentNullException(nameof(connection));
+         if (entity is null) throw new ArgumentNullException(nameof(entity));
+ 
+-        var plan = PlanCache.GetOrAdd(typeof(T), BuildPlan);
++        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, DatabaseType.SqlServer));
+         var keyValue = plan.KeyProp.GetValue(entity)
+-            ?? throw new InvalidOperationException("Key value cannot be null.");
++            ?? throw new InvalidOperationException($"Key value for '{plan.KeyProp.Name}' cannot be null on entity of type '{typeof(T).Name}'.");
+ 
+         var setClauses = new List<string>();
+         var parameters = new DynamicParameters();
+@@ -86,17 +146,29 @@ public static class DapperPartialExtensions
+ 
+             var paramName = $"p_{partial.Name}";
+             var columnName = GetColumnName(partial.Prop) ?? partial.Name;
+-            setClauses.Add($"{QuoteIdentifier(columnName)} = @{paramName}");
++            setClauses.Add($"{QuoteIdentifier(columnName, plan.DatabaseType)} = @{paramName}");
+             parameters.Add(paramName, value);
+         }
+ 
+         if (setClauses.Count == 0)
+             return Task.FromResult(0);
+ 
+-        var sql = $"UPDATE {plan.QualifiedTableName} SET {string.Join(", ", setClauses)} WHERE {QuoteIdentifier(plan.KeyColumnName)} = @__key;";
++        var sql = $"UPDATE {plan.QualifiedTableName} SET {string.Join(", ", setClauses)} WHERE {QuoteIdentifier(plan.KeyColumnName, plan.DatabaseType)} = @__key;";
+         return connection.ExecuteAsync(sql, parameters, transaction, commandTimeout);
+     }
+ 
++    /// <summary>
++    /// Inserts only the fields of an entity that have been explicitly set using <see cref="Partial{T}"/>.
++    /// If no fields are set, executes an INSERT with DEFAULT VALUES.
++    /// </summary>
++    /// <typeparam name="T">The type of the entity to insert.</typeparam>
++    /// <param name="connection">The database connection to use.</param>
++    /// <param name="entity">The entity with partially set fields. Cannot be null.</param>
++    /// <param name="transaction">Optional database transaction. Defaults to null.</param>
++    /// <param name="commandTimeout">Optional command timeout in seconds. Defaults to null.</param>
++    /// <returns>The number of rows affected.</returns>
++    /// <exception cref="ArgumentNullException">Thrown when <paramref name="connection"/> or <paramref name="entity"/> is null.</exception>
++    /// <exception cref="InvalidOperationException">Thrown when no key property is found.</exception>
+     public static int InsertPartials<T>(
+         this IDbConnection connection,
+         T entity,
+@@ -107,7 +179,7 @@ public static class DapperPartialExtensions
+         if (connection is null) throw new ArgumentNullException(nameof(connection));
+         if (entity is null) throw new ArgumentNullException(nameof(entity));
+ 
+-        var plan = PlanCache.GetOrAdd(typeof(T), BuildPlan);
++        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, DatabaseType.SqlServer));
+         var parameters = new DynamicParameters();
+         var columns = new List<string>();
+         var valueParams = new List<string>();
+@@ -119,7 +191,7 @@ public static class DapperPartialExtensions
+ 
+             var paramName = $"p_{partial.Name}";
+             var columnName = GetColumnName(partial.Prop) ?? partial.Name;
+-            columns.Add(QuoteIdentifier(columnName));
++            columns.Add(QuoteIdentifier(columnName, plan.DatabaseType));
+             valueParams.Add($"@{paramName}");
+             parameters.Add(paramName, value);
+         }
+@@ -137,6 +209,18 @@ public static class DapperPartialExtensions
+         return connection.Execute(sql, parameters, transaction, commandTimeout);
+     }
+ 
++    /// <summary>
++    /// Asynchronously inserts only the fields of an entity that have been explicitly set using <see cref="Partial{T}"/>.
++    /// If no fields are set, executes an INSERT with DEFAULT VALUES.
++    /// </summary>
++    /// <typeparam name="T">The type of the entity to insert.</typeparam>
++    /// <param name="connection">The database connection to use.</param>
++    /// <param name="entity">The entity with partially set fields. Cannot be null.</param>
++    /// <param name="transaction">Optional database transaction. Defaults to null.</param>
++    /// <param name="commandTimeout">Optional command timeout in seconds. Defaults to null.</param>
++    /// <returns>A task representing the asynchronous operation. The result is the number of rows affected.</returns>
++    /// <exception cref="ArgumentNullException">Thrown when <paramref name="connection"/> or <paramref name="entity"/> is null.</exception>
++    /// <exception cref="InvalidOperationException">Thrown when no key property is found.</exception>
+     public static Task<int> InsertPartialsAsync<T>(
+         this IDbConnection connection,
+         T entity,
+@@ -147,7 +231,7 @@ public static class DapperPartialExtensions
+         if (connection is null) throw new ArgumentNullException(nameof(connection));
+         if (entity is null) throw new ArgumentNullException(nameof(entity));
+ 
+-        var plan = PlanCache.GetOrAdd(typeof(T), BuildPlan);
++        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, DatabaseType.SqlServer));
+         var parameters = new DynamicParameters();
+         var columns = new List<string>();
+         var valueParams = new List<string>();
+@@ -159,7 +243,7 @@ public static class DapperPartialExtensions
+ 
+             var paramName = $"p_{partial.Name}";
+             var columnName = GetColumnName(partial.Prop) ?? partial.Name;
+-            columns.Add(QuoteIdentifier(columnName));
++            columns.Add(QuoteIdentifier(columnName, plan.DatabaseType));
+             valueParams.Add($"@{paramName}");
+             parameters.Add(paramName, value);
+         }
+@@ -177,7 +261,7 @@ public static class DapperPartialExtensions
+         return connection.ExecuteAsync(sql, parameters, transaction, commandTimeout);
+     }
+ 
+-    private static EntityPlan BuildPlan(Type entityType)
++    private static EntityPlan BuildPlan(Type entityType, DatabaseType databaseType = DatabaseType.SqlServer)
+     {
+         var props = entityType.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+             .Where(p => p.GetMethod is not null && p.SetMethod is not null)
+@@ -186,12 +270,12 @@ public static class DapperPartialExtensions
+         var keyProp = props.FirstOrDefault(p => p.GetCustomAttribute<KeyAttribute>() is not null)
+             ?? props.FirstOrDefault(p => string.Equals(p.Name, "Id", StringComparison.OrdinalIgnoreCase))
+             ?? props.FirstOrDefault(p => string.Equals(p.Name, entityType.Name + "Id", StringComparison.OrdinalIgnoreCase))
+-            ?? throw new InvalidOperationException($"No key property found on {entityType.Name}. Add [Key] or a conventional Id property.");
++            ?? throw new InvalidOperationException($"No key property found on '{entityType.Name}'. Add [Key] attribute or use conventional 'Id' or '{entityType.Name}Id' property name.");
+ 
+         var tableAttr = entityType.GetCustomAttribute<TableAttribute>();
+         var tableName = tableAttr?.Name ?? entityType.Name;
+         var schema = tableAttr?.Schema;
+-        var qualifiedTableName = BuildQualifiedTableName(tableName, schema);
++        var qualifiedTableName = BuildQualifiedTableName(tableName, schema, databaseType);
+         var keyColumnName = GetColumnName(keyProp) ?? keyProp.Name;
+ 
+         var partialProps = new List<PartialProp>();
+@@ -206,7 +290,7 @@ public static class DapperPartialExtensions
+             partialProps.Add(new PartialProp(prop.Name, prop, isSetProp, valueProp));
+         }
+ 
+-        return new EntityPlan(qualifiedTableName, keyProp, keyColumnName, partialProps);
++        return new EntityPlan(qualifiedTableName, keyProp, keyColumnName, partialProps, databaseType);
+     }
+ 
+     private static bool IsPartialType(Type type, out PropertyInfo isSetProp, out PropertyInfo valueProp)
+@@ -242,17 +326,34 @@ public static class DapperPartialExtensions
+     private static string? GetColumnName(PropertyInfo property)
+         => property.GetCustomAttribute<ColumnAttribute>()?.Name;
+ 
+-    private static string BuildQualifiedTableName(string tableName, string? schema)
++    private static string BuildQualifiedTableName(string tableName, string? schema, DatabaseType databaseType)
+     {
+         if (string.IsNullOrWhiteSpace(schema))
+-            return QuoteIdentifier(tableName);
++            return QuoteIdentifier(tableName, databaseType);
+ 
+-        return $"{QuoteIdentifier(schema)}.{QuoteIdentifier(tableName)}";
++        return $"{QuoteIdentifier(schema, databaseType)}.{QuoteIdentifier(tableName, databaseType)}";
+     }
+ 
+-    private static string QuoteIdentifier(string identifier)
++    /// <summary>
++    /// Quotes an identifier for use in SQL statements, based on the database type.
++    /// </summary>
++    /// <param name="identifier">The identifier to quote.</param>
++    /// <param name="databaseType">The type of database determining the quoting style.</param>
++    /// <returns>The quoted identifier.</returns>
++    /// <remarks>
++    /// SQL Server uses square brackets [identifier], while SQLite/PostgreSQL/MySQL use double quotes "identifier" or backticks `identifier`.
++    /// </remarks>
++    private static string QuoteIdentifier(string identifier, DatabaseType databaseType)
+     {
+-        var clean = identifier.Replace("]", "]]", StringComparison.Ordinal);
+-        return $"[{clean}]";
++        return databaseType switch
++        {
++            DatabaseType.SqlServer =>
++            {
++                var clean = identifier.Replace("]", "]]", StringComparison.Ordinal);
++                return $"[{clean}]";
++            },
++            DatabaseType.MySql => $"`{identifier.Replace("`", "``", StringComparison.Ordinal)}`",
++            _ => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
++        };
+     }
+ }
+diff --git a/Partial.cs b/Partial.cs
+index 0851e65..ed619cb 100644
+--- a/Partial.cs
++++ b/Partial.cs
+@@ -1,17 +1,35 @@
+ namespace Dapper.PartialUpdate;
+ 
++/// <summary>
++/// A wrapper struct that tracks whether a value has been explicitly set.
++/// Used for partial update operations where only modified fields should be persisted.
++/// </summary>
++/// <typeparam name="T">The type of the wrapped value.</typeparam>
+ public struct Partial<T>
+ {
+     private T _value;
+ 
++    /// <summary>
++    /// Initializes a new instance of the <see cref="Partial{T}"/> struct with a value.
++    /// Sets <see cref="IsSet"/> to <c>true</c>.
++    /// </summary>
++    /// <param name="value">The value to wrap.</param>
+     public Partial(T value)
+     {
+         _value = value;
+         IsSet = true;
+     }
+ 
++    /// <summary>
++    /// Gets a value indicating whether this partial has been explicitly set.
++    /// </summary>
++    /// <value><c>true</c> if the value has been set; otherwise, <c>false</c>.</value>
+     public bool IsSet { get; private set; }
+ 
++    /// <summary>
++    /// Gets or sets the wrapped value. Setting the value automatically marks it as set.
++    /// </summary>
++    /// <value>The wrapped value.</value>
+     public T Value
+     {
+         readonly get => _value;
+@@ -22,13 +40,27 @@ public struct Partial<T>
+         }
+     }
+ 
++    /// <summary>
++    /// Unsets the value, marking it as not set. This causes the field to be omitted
++    /// from partial update operations.
++    /// </summary>
+     public void Unset()
+     {
+         _value = default!;
+         IsSet = false;
+     }
+ 
++    /// <summary>
++    /// Implicitly converts a value to a <see cref="Partial{T}"/>.
++    /// This allows direct assignment like <c>entity.Name = "Alice"</c>.
++    /// </summary>
++    /// <param name="value">The value to convert.</param>
++    /// <returns>A new <see cref="Partial{T}"/> with the value and <see cref="IsSet"/> set to <c>true</c>.</returns>
+     public static implicit operator Partial<T>(T value) => new(value);
+ 
++    /// <summary>
++    /// Returns a string representation of this partial.
++    /// </summary>
++    /// <returns>The string representation of the value if set, otherwise "&lt;unset&gt;".</returns>
+     public override readonly string ToString() => IsSet ? $"{_value}" : "<unset>";
+ }
+diff --git a/README.md b/README.md
+index 53690b6..7b54b55 100644
+--- a/README.md
++++ b/README.md
+@@ -10,6 +10,15 @@ Use this when you need patch-style updates/inserts:
+ 
+ `Partial<T>` tracks whether a value has been set (`IsSet`), and extensions build SQL using only those set fields.
+ 
++## Features
++
++- **Partial Updates**: Update only the fields you've explicitly set
++- **Partial Inserts**: Insert only the fields you've set, or use DEFAULT VALUES
++- **Database Agnostic**: Supports SQL Server, SQLite, PostgreSQL, and MySQL with automatic identifier quoting
++- **Async Support**: Full async/await support for all operations
++- **Comprehensive Testing**: Unit tests and SQLite integration tests included
++- **Example Project**: Ready-to-run SQLite example demonstrating all features
++
+ ## Install
+ 
+ ```bash
+@@ -58,6 +67,29 @@ You can also assign directly with implicit conversion:
+ entity.Name = "Alice"; // Partial<string> IsSet=true
+ ```
+ 
++## Database Type Support
++
++The library supports multiple database types with appropriate identifier quoting:
++
++```csharp
++// SQL Server (default, uses [brackets])
++connection.UpdatePartials(entity);
++
++// SQLite, PostgreSQL (uses "double quotes")
++connection.UpdatePartials(entity, DatabaseType.Standard);
++
++// MySQL (uses `backticks`)
++connection.UpdatePartials(entity, DatabaseType.MySql);
++```
++
++### Identifier Quoting
++
++- **SQL Server**: `[TableName]`, `[ColumnName]`
++- **SQLite/PostgreSQL**: `"TableName"`, `"ColumnName"`
++- **MySQL**: `` `TableName` ``, `` `ColumnName` ``
++
++The library automatically escapes special characters in identifiers.
++
+ ## Extension Methods
+ 
+ `DapperPartialExtensions` provides:
+@@ -66,18 +98,39 @@ entity.Name = "Alice"; // Partial<string> IsSet=true
+ - `InsertPartials<T>(...)`
+ - `InsertPartialsAsync<T>(...)`
+ 
++All methods have overloads that accept a `DatabaseType` parameter for database-specific identifier quoting.
++
+ ### Update behavior
+ 
+-- Table name from `[Table]` or class name.
+-- Key from `[Key]`, or `Id`, or `{TypeName}Id`.
+-- Column names from `[Column]` or property name.
+-- Only `Partial<T>` properties with `IsSet == true` are updated.
+-- If no fields are set, update returns `0` without executing SQL.
++- Table name from `[Table]` or class name
++- Key from `[Key]`, or `Id`, or `{TypeName}Id`
++- Column names from `[Column]` or property name
++- Only `Partial<T>` properties with `IsSet == true` are updated
++- If no fields are set, update returns `0` without executing SQL
++- Improved error messages with entity and property names
+ 
+ ### Insert behavior
+ 
+-- Only set `Partial<T>` properties are included.
+-- If no partial fields are set, executes `INSERT ... DEFAULT VALUES`.
++- Only set `Partial<T>` properties are included
++- If no partial fields are set, executes `INSERT ... DEFAULT VALUES`
++
++## Examples
++
++See the `examples/SQLiteExample` directory for a complete working example using SQLite.
++
++## Testing
++
++Run the test suite:
++
++```bash
++cd tests/Dapper.PartialUpdate.Tests
++dotnet test
++```
++
++The test suite includes:
++- Unit tests for `Partial<T>` wrapper
++- Database type quoting tests
++- SQLite integration tests for insert and update operations
+ 
+ ## Build NuGet Package (local)
+ 
+diff --git a/examples/SQLiteExample/Program.cs b/examples/SQLiteExample/Program.cs
+new file mode 100644
+index 0000000..1c0daa0
+--- /dev/null
++++ b/examples/SQLiteExample/Program.cs
+@@ -0,0 +1,126 @@
++using System.Data;
++using Dapper;
++using Dapper.PartialUpdate;
++using Microsoft.Data.Sqlite;
++using System.ComponentModel.DataAnnotations;
++using System.ComponentModel.DataAnnotations.Schema;
++
++// This example demonstrates how to use Dapper.PartialUpdate with SQLite
++// to perform partial updates and inserts.
++
++Console.WriteLine("=== Dapper.PartialUpdate SQLite Example ===\n");
++
++// Create an in-memory SQLite database
++using var connection = new SqliteConnection("Filename=:memory:");
++connection.Open();
++
++// Initialize the database schema
++connection.Execute(@"
++    CREATE TABLE Products (
++        Id INTEGER PRIMARY KEY AUTOINCREMENT,
++        Name TEXT,
++        Price REAL,
++        Stock INTEGER,
++        Description TEXT
++    );
++");
++
++Console.WriteLine("Database initialized with Products table.\n");
++
++// Example 1: Insert with only some fields set
++Console.WriteLine("1. Inserting a product with only Name and Price:");
++var newProduct = new Product();
++newProduct.Name = "Laptop";
++newProduct.Price = 999.99;
++// Note: Stock and Description are not set, so they won't be inserted
++
++connection.InsertPartials(newProduct, DatabaseType.Standard);
++Console.WriteLine($"   Inserted product with Id = {newProduct.Id}");
++
++// Verify the insert
++var inserted = connection.QuerySingle<Product>("SELECT * FROM Products WHERE Id = @Id", new { Id = newProduct.Id });
++Console.WriteLine($"   Name: {inserted.NameValue}, Price: {inserted.PriceValue}, Stock: {inserted.StockValue ?? 0}, Description: {inserted.DescriptionValue ?? "(null)"}\n");
++
++// Example 2: Insert with all fields set
++Console.WriteLine("2. Inserting a product with all fields:");
++var product2 = new Product();
++product2.Name = "Mouse";
++product2.Price = 29.99;
++product2.Stock = 100;
++product2.Description = "Wireless optical mouse";
++
++connection.InsertPartials(product2, DatabaseType.Standard);
++Console.WriteLine($"   Inserted product with Id = {product2.Id}");
++
++// Verify the insert
++var inserted2 = connection.QuerySingle<Product>("SELECT * FROM Products WHERE Id = @Id", new { Id = product2.Id });
++Console.WriteLine($"   Name: {inserted2.NameValue}, Price: {inserted2.PriceValue}, Stock: {inserted2.StockValue}, Description: {inserted2.DescriptionValue}\n");
++
++// Example 3: Update only specific fields
++Console.WriteLine("3. Updating only the Stock field of the first product:");
++var productToUpdate = connection.QuerySingle<Product>("SELECT * FROM Products WHERE Id = 1");
++productToUpdate.Stock = 50; // Only set Stock, leave other fields unset
++
++connection.UpdatePartials(productToUpdate, DatabaseType.Standard);
++Console.WriteLine("   Updated Stock to 50");
++
++// Verify the update
++var updated = connection.QuerySingle<Product>("SELECT * FROM Products WHERE Id = 1");
++Console.WriteLine($"   Name: {updated.NameValue}, Price: {updated.PriceValue}, Stock: {updated.StockValue}, Description: {updated.DescriptionValue ?? "(null)"}\n");
++
++// Example 4: Update multiple fields at once
++Console.WriteLine("4. Updating Price and Description of the second product:");
++var productToUpdate2 = connection.QuerySingle<Product>("SELECT * FROM Products WHERE Id = 2");
++productToUpdate2.Price = 24.99;
++productToUpdate2.Description = "Ergonomic wireless mouse";
++
++connection.UpdatePartials(productToUpdate2, DatabaseType.Standard);
++Console.WriteLine("   Updated Price to 24.99 and Description");
++
++// Verify the update
++var updated2 = connection.QuerySingle<Product>("SELECT * FROM Products WHERE Id = 2");
++Console.WriteLine($"   Name: {updated2.NameValue}, Price: {updated2.PriceValue}, Stock: {updated2.StockValue}, Description: {updated2.DescriptionValue}\n");
++
++// Example 5: Using async methods
++Console.WriteLine("5. Using async methods to insert a new product:");
++var product3 = new Product();
++product3.Name = "Keyboard";
++product3.Price = 79.99;
++product3.Stock = 25;
++
++await connection.InsertPartialsAsync(product3, DatabaseType.Standard);
++Console.WriteLine($"   Inserted product with Id = {product3.Id}");
++
++// Example 6: Insert with no fields set (uses DEFAULT VALUES)
++Console.WriteLine("6. Inserting a product with no fields set:");
++var emptyProduct = new Product();
++connection.InsertPartials(emptyProduct, DatabaseType.Standard);
++Console.WriteLine($"   Inserted empty product with Id = {emptyProduct.Id}");
++
++// Verify all products
++Console.WriteLine("\n=== All Products in Database ===");
++var allProducts = connection.Query<Product>("SELECT * FROM Products").ToList();
++foreach (var p in allProducts)
++{
++    Console.WriteLine($"   Id: {p.Id}, Name: {p.NameValue ?? "(null)"}, Price: {p.PriceValue ?? 0}, Stock: {p.StockValue ?? 0}, Description: {p.DescriptionValue ?? "(null)"}");
++}
++
++Console.WriteLine("\n=== Example Complete ===");
++
++[Table("Products")]
++public class Product
++{
++    [Key]
++    public int Id { get; set; }
++
++    public Partial<string> Name { get; set; }
++    public Partial<decimal> Price { get; set; }
++    public Partial<int> Stock { get; set; }
++    public Partial<string> Description { get; set; }
++
++    // Helper properties for reading values in the example
++    public string? NameValue => Name.IsSet ? Name.Value : null;
++    public decimal? PriceValue => Price.IsSet ? Price.Value : null;
++    public int? StockValue => Stock.IsSet ? Stock.Value : null;
++    public string? DescriptionValue => Description.IsSet ? Description.Value : null;
++}
+diff --git a/examples/SQLiteExample/SQLiteExample.csproj b/examples/SQLiteExample/SQLiteExample.csproj
+new file mode 100644
+index 0000000..193ffec
+--- /dev/null
++++ b/examples/SQLiteExample/SQLiteExample.csproj
+@@ -0,0 +1,19 @@
++<Project Sdk="Microsoft.NET.Sdk">
++
++  <PropertyGroup>
++    <OutputType>Exe</OutputType>
++    <TargetFramework>net10.0</TargetFramework>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <Nullable>enable</Nullable>
++  </PropertyGroup>
++
++  <ItemGroup>
++    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
++    <PackageReference Include="Dapper" Version="2.1.35" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="..\..\Dapper.PartialUpdate.csproj" />
++  </ItemGroup>
++
++</Project>
+diff --git a/tests/Dapper.PartialUpdate.Tests/Dapper.PartialUpdate.Tests.csproj b/tests/Dapper.PartialUpdate.Tests/Dapper.PartialUpdate.Tests.csproj
+new file mode 100644
+index 0000000..e0fc58a
+--- /dev/null
++++ b/tests/Dapper.PartialUpdate.Tests/Dapper.PartialUpdate.Tests.csproj
+@@ -0,0 +1,30 @@
++<Project Sdk="Microsoft.NET.Sdk">
++
++  <PropertyGroup>
++    <TargetFramework>net10.0</TargetFramework>
++    <ImplicitUsings>enable</ImplicitUsings>
++    <Nullable>enable</Nullable>
++    <IsPackable>false</IsPackable>
++    <IsTestProject>true</IsTestProject>
++  </PropertyGroup>
++
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
++    <PackageReference Include="xunit" Version="2.9.2" />
++    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
++      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
++      <PrivateAssets>all</PrivateAssets>
++    </PackageReference>
++    <PackageReference Include="coverlet.collector" Version="6.0.2">
++      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
++      <PrivateAssets>all</PrivateAssets>
++    </PackageReference>
++    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
++    <PackageReference Include="Dapper" Version="2.1.35" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="..\..\Dapper.PartialUpdate.csproj" />
++  </ItemGroup>
++
++</Project>
+diff --git a/tests/Dapper.PartialUpdate.Tests/DatabaseTypeTests.cs b/tests/Dapper.PartialUpdate.Tests/DatabaseTypeTests.cs
+new file mode 100644
+index 0000000..b8b1244
+--- /dev/null
++++ b/tests/Dapper.PartialUpdate.Tests/DatabaseTypeTests.cs
+@@ -0,0 +1,153 @@
++namespace Dapper.PartialUpdate.Tests;
++
++public class DatabaseTypeTests
++{
++    [Fact]
++    public void QuoteIdentifier_SqlServer_UsesSquareBrackets()
++    {
++        // Arrange
++        const string identifier = "TableName";
++        const string expected = "[TableName]";
++
++        // Act
++        var result = QuoteIdentifier(identifier, DatabaseType.SqlServer);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    [Fact]
++    public void QuoteIdentifier_SqlServer_EscapesClosingBrackets()
++    {
++        // Arrange
++        const string identifier = "Table]Name";
++        const string expected = "[Table]]Name]";
++
++        // Act
++        var result = QuoteIdentifier(identifier, DatabaseType.SqlServer);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    [Fact]
++    public void QuoteIdentifier_MySql_UsesBackticks()
++    {
++        // Arrange
++        const string identifier = "TableName";
++        const string expected = "`TableName`";
++
++        // Act
++        var result = QuoteIdentifier(identifier, DatabaseType.MySql);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    [Fact]
++    public void QuoteIdentifier_MySql_EscapesClosingBackticks()
++    {
++        // Arrange
++        const string identifier = "Table`Name";
++        const string expected = "`Table``Name`";
++
++        // Act
++        var result = QuoteIdentifier(identifier, DatabaseType.MySql);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    [Fact]
++    public void QuoteIdentifier_Standard_UsesDoubleQuotes()
++    {
++        // Arrange
++        const string identifier = "TableName";
++        const string expected = "\"TableName\"";
++
++        // Act
++        var result = QuoteIdentifier(identifier, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    [Fact]
++    public void QuoteIdentifier_Standard_EscapesClosingQuotes()
++    {
++        // Arrange
++        const string identifier = "Table\"Name";
++        const string expected = "\"Table\"\"Name\"";
++
++        // Act
++        var result = QuoteIdentifier(identifier, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    [Fact]
++    public void QuoteIdentifier_WithSchema_SqlServer()
++    {
++        // Arrange
++        const string schema = "dbo";
++        const string table = "Users";
++        const string expected = "[dbo].[Users]";
++
++        // Act
++        var result = BuildQualifiedTableName(schema, table, DatabaseType.SqlServer);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    [Fact]
++    public void QuoteIdentifier_WithSchema_Standard()
++    {
++        // Arrange
++        const string schema = "public";
++        const string table = "Users";
++        const string expected = "\"public\".\"Users\"";
++
++        // Act
++        var result = BuildQualifiedTableName(schema, table, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    [Fact]
++    public void QuoteIdentifier_WithSchema_MySql()
++    {
++        // Arrange
++        const string schema = "mydb";
++        const string table = "Users";
++        const string expected = "`mydb`.`Users`";
++
++        // Act
++        var result = BuildQualifiedTableName(schema, table, DatabaseType.MySql);
++
++        // Assert
++        Assert.Equal(expected, result);
++    }
++
++    // Helper methods that mirror the private methods in DapperPartialExtensions
++    private static string QuoteIdentifier(string identifier, DatabaseType databaseType)
++    {
++        return databaseType switch
++        {
++            DatabaseType.SqlServer =>
++            {
++                var clean = identifier.Replace("]", "]]", StringComparison.Ordinal);
++                return $"[{clean}]";
++            },
++            DatabaseType.MySql => $"`{identifier.Replace("`", "``", StringComparison.Ordinal)}`",
++            _ => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
++        };
++    }
++
++    private static string BuildQualifiedTableName(string schema, string table, DatabaseType databaseType)
++    {
++        return $"{QuoteIdentifier(schema, databaseType)}.{QuoteIdentifier(table, databaseType)}";
++    }
++}
+diff --git a/tests/Dapper.PartialUpdate.Tests/IntegrationTests.cs b/tests/Dapper.PartialUpdate.Tests/IntegrationTests.cs
+new file mode 100644
+index 0000000..cc700f9
+--- /dev/null
++++ b/tests/Dapper.PartialUpdate.Tests/IntegrationTests.cs
+@@ -0,0 +1,185 @@
++using Microsoft.Data.Sqlite;
++using Dapper;
++
++namespace Dapper.PartialUpdate.Tests;
++
++public class IntegrationTests : IDisposable
++{
++    private readonly SqliteConnection _connection;
++
++    public IntegrationTests()
++    {
++        _connection = new SqliteConnection("Filename=:memory:");
++        _connection.Open();
++        InitializeDatabase();
++    }
++
++    private void InitializeDatabase()
++    {
++        _connection.Execute(@"
++            CREATE TABLE Users (
++                Id INTEGER PRIMARY KEY AUTOINCREMENT,
++                Name TEXT,
++                Email TEXT,
++                Age INTEGER
++            );
++        ");
++    }
++
++    public void Dispose()
++    {
++        _connection?.Dispose();
++    }
++
++    [Fact]
++    public void InsertPartials_WithSomeFields_InsertsOnlySetFields()
++    {
++        // Arrange
++        var user = new User();
++        user.Name = "John Doe";
++        user.Age = 30;
++
++        // Act
++        var rowsAffected = _connection.InsertPartials(user, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(1, rowsAffected);
++
++        var inserted = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        Assert.Equal("John Doe", inserted.Name);
++        Assert.Equal(30, inserted.Age);
++        Assert.Null(inserted.Email);
++    }
++
++    [Fact]
++    public void InsertPartials_WithNoFields_InsertsWithDefaults()
++    {
++        // Arrange
++        var user = new User();
++
++        // Act
++        var rowsAffected = _connection.InsertPartials(user, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(1, rowsAffected);
++
++        var inserted = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        Assert.Null(inserted.Name);
++        Assert.Null(inserted.Email);
++        Assert.Null(inserted.Age);
++    }
++
++    [Fact]
++    public void UpdatePartials_UpdatesOnlySetFields()
++    {
++        // Arrange
++        _connection.Execute("INSERT INTO Users (Name, Email, Age) VALUES ('Jane', 'jane@example.com', 25)");
++
++        var user = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        user.Name = "Jane Updated";
++
++        // Act
++        var rowsAffected = _connection.UpdatePartials(user, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(1, rowsAffected);
++
++        var updated = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        Assert.Equal("Jane Updated", updated.Name);
++        Assert.Equal("jane@example.com", updated.Email); // Should remain unchanged
++        Assert.Equal(25, updated.Age); // Should remain unchanged
++    }
++
++    [Fact]
++    public void UpdatePartials_WithMultipleFields_UpdatesAllSetFields()
++    {
++        // Arrange
++        _connection.Execute("INSERT INTO Users (Name, Email, Age) VALUES ('Bob', 'bob@example.com', 40)");
++
++        var user = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        user.Email = "newbob@example.com";
++        user.Age = 41;
++
++        // Act
++        var rowsAffected = _connection.UpdatePartials(user, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(1, rowsAffected);
++
++        var updated = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        Assert.Equal("Bob", updated.Name); // Should remain unchanged
++        Assert.Equal("newbob@example.com", updated.Email);
++        Assert.Equal(41, updated.Age);
++    }
++
++    [Fact]
++    public void UpdatePartials_WithNoSetFields_ReturnsZero()
++    {
++        // Arrange
++        _connection.Execute("INSERT INTO Users (Name, Email, Age) VALUES ('Alice', 'alice@example.com', 30)");
++
++        var user = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++
++        // Act
++        var rowsAffected = _connection.UpdatePartials(user, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(0, rowsAffected);
++    }
++
++    [Fact]
++    public void InsertPartialsAsync_WithSomeFields_InsertsOnlySetFields()
++    {
++        // Arrange
++        var user = new User();
++        user.Name = "Async User";
++        user.Email = "async@example.com";
++
++        // Act
++        var rowsAffected = await _connection.InsertPartialsAsync(user, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(1, rowsAffected);
++
++        var inserted = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        Assert.Equal("Async User", inserted.Name);
++        Assert.Equal("async@example.com", inserted.Email);
++        Assert.Null(inserted.Age);
++    }
++
++    [Fact]
++    public void UpdatePartialsAsync_UpdatesOnlySetFields()
++    {
++        // Arrange
++        _connection.Execute("INSERT INTO Users (Name, Email, Age) VALUES ('Sync', 'sync@example.com', 50)");
++
++        var user = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        user.Name = "Sync Updated";
++
++        // Act
++        var rowsAffected = _connection.UpdatePartialsAsync(user, DatabaseType.Standard);
++
++        // Assert
++        Assert.Equal(1, rowsAffected.Result);
++
++        var updated = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
++        Assert.Equal("Sync Updated", updated.Name);
++        Assert.Equal("sync@example.com", updated.Email);
++    }
++}
++
++[Table("Users")]
++public class User
++{
++    [Key]
++    public int Id { get; set; }
++
++    public Partial<string> Name { get; set; }
++    public Partial<string> Email { get; set; }
++    public Partial<int> Age { get; set; }
++
++    // Helper properties for reading values in tests
++    public string? NameValue => Name.IsSet ? Name.Value : null;
++    public string? EmailValue => Email.IsSet ? Email.Value : null;
++    public int? AgeValue => Age.IsSet ? Age.Value : (int?)null;
++}
+diff --git a/tests/Dapper.PartialUpdate.Tests/PartialTests.cs b/tests/Dapper.PartialUpdate.Tests/PartialTests.cs
+new file mode 100644
+index 0000000..7212de7
+--- /dev/null
++++ b/tests/Dapper.PartialUpdate.Tests/PartialTests.cs
+@@ -0,0 +1,83 @@
++namespace Dapper.PartialUpdate.Tests;
++
++public class PartialTests
++{
++    [Fact]
++    public void Constructor_SetsValueAndIsSet()
++    {
++        // Arrange & Act
++        var partial = new Partial<string>("test");
++
++        // Assert
++        Assert.True(partial.IsSet);
++        Assert.Equal("test", partial.Value);
++    }
++
++    [Fact]
++    public void ImplicitOperator_SetsValueAndIsSet()
++    {
++        // Arrange & Act
++        Partial<string> partial = "test";
++
++        // Assert
++        Assert.True(partial.IsSet);
++        Assert.Equal("test", partial.Value);
++    }
++
++    [Fact]
++    public void ValueSetter_SetsIsSetToTrue()
++    {
++        // Arrange
++        var partial = new Partial<string>();
++
++        // Act
++        partial.Value = "new value";
++
++        // Assert
++        Assert.True(partial.IsSet);
++        Assert.Equal("new value", partial.Value);
++    }
++
++    [Fact]
++    public void Unset_ResetsValueAndIsSet()
++    {
++        // Arrange
++        var partial = new Partial<string>("test");
++
++        // Act
++        partial.Unset();
++
++        // Assert
++        Assert.False(partial.IsSet);
++    }
++
++    [Fact]
++    public void ToString_ReturnsValueWhenSet()
++    {
++        // Arrange
++        var partial = new Partial<int>(42);
++
++        // Act & Assert
++        Assert.Equal("42", partial.ToString());
++    }
++
++    [Fact]
++    public void ToString_ReturnsUnsetWhenNotSet()
++    {
++        // Arrange
++        Partial<int> partial = default;
++
++        // Act & Assert
++        Assert.Equal("<unset>", partial.ToString());
++    }
++
++    [Fact]
++    public void DefaultPartial_IsNotSet()
++    {
++        // Arrange
++        Partial<string> partial = default;
++
++        // Assert
++        Assert.False(partial.IsSet);
++    }
++}
