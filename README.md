@@ -10,6 +10,15 @@ Use this when you need patch-style updates/inserts:
 
 `Partial<T>` tracks whether a value has been set (`IsSet`), and extensions build SQL using only those set fields.
 
+## Features
+
+- **Partial Updates**: Update only the fields you've explicitly set
+- **Partial Inserts**: Insert only the fields you've set, or use DEFAULT VALUES
+- **Database Agnostic**: Supports SQL Server, SQLite, PostgreSQL, and MySQL with automatic identifier quoting
+- **Async Support**: Full async/await support for all operations
+- **Comprehensive Testing**: Unit tests and SQLite integration tests included
+- **Example Project**: Ready-to-run SQLite example demonstrating all features
+
 ## Install
 
 ```bash
@@ -58,6 +67,29 @@ You can also assign directly with implicit conversion:
 entity.Name = "Alice"; // Partial<string> IsSet=true
 ```
 
+## Database Type Support
+
+The library supports multiple database types with appropriate identifier quoting:
+
+```csharp
+// SQL Server (default, uses [brackets])
+connection.UpdatePartials(entity);
+
+// SQLite, PostgreSQL (uses "double quotes")
+connection.UpdatePartials(entity, DatabaseType.Standard);
+
+// MySQL (uses `backticks`)
+connection.UpdatePartials(entity, DatabaseType.MySql);
+```
+
+### Identifier Quoting
+
+- **SQL Server**: `[TableName]`, `[ColumnName]`
+- **SQLite/PostgreSQL**: `"TableName"`, `"ColumnName"`
+- **MySQL**: `` `TableName` ``, `` `ColumnName` ``
+
+The library automatically escapes special characters in identifiers.
+
 ## Extension Methods
 
 `DapperPartialExtensions` provides:
@@ -66,18 +98,39 @@ entity.Name = "Alice"; // Partial<string> IsSet=true
 - `InsertPartials<T>(...)`
 - `InsertPartialsAsync<T>(...)`
 
+All methods have overloads that accept a `DatabaseType` parameter for database-specific identifier quoting.
+
 ### Update behavior
 
-- Table name from `[Table]` or class name.
-- Key from `[Key]`, or `Id`, or `{TypeName}Id`.
-- Column names from `[Column]` or property name.
-- Only `Partial<T>` properties with `IsSet == true` are updated.
-- If no fields are set, update returns `0` without executing SQL.
+- Table name from `[Table]` or class name
+- Key from `[Key]`, or `Id`, or `{TypeName}Id`
+- Column names from `[Column]` or property name
+- Only `Partial<T>` properties with `IsSet == true` are updated
+- If no fields are set, update returns `0` without executing SQL
+- Improved error messages with entity and property names
 
 ### Insert behavior
 
-- Only set `Partial<T>` properties are included.
-- If no partial fields are set, executes `INSERT ... DEFAULT VALUES`.
+- Only set `Partial<T>` properties are included
+- If no partial fields are set, executes `INSERT ... DEFAULT VALUES`
+
+## Examples
+
+See the `examples/SQLiteExample` directory for a complete working example using SQLite.
+
+## Testing
+
+Run the test suite:
+
+```bash
+cd tests/Dapper.PartialUpdate.Tests
+dotnet test
+```
+
+The test suite includes:
+- Unit tests for `Partial<T>` wrapper
+- Database type quoting tests
+- SQLite integration tests for insert and update operations
 
 ## Build NuGet Package (local)
 
