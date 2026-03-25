@@ -114,13 +114,13 @@ public class Product
     public int Id { get; set; }
 
     public Partial<string> Name { get; set; }
-    public Partial<decimal> Price { get; set; }
-    public Partial<int> Stock { get; set; }
+    public Partial<double> Price { get; set; }
+    public Partial<long> Stock { get; set; }
     public Partial<string> Description { get; set; }
 
     // Helper properties for reading values in the example
     public string? NameValue => Name.IsSet ? Name.Value : null;
-    public decimal? PriceValue => Price.IsSet ? Price.Value : null;
-    public int? StockValue => Stock.IsSet ? Stock.Value : null;
+    public double? PriceValue => Price.IsSet ? Price.Value : null;
+    public long? StockValue => Stock.IsSet ? Stock.Value : null;
     public string? DescriptionValue => Description.IsSet ? Description.Value : null;
 }

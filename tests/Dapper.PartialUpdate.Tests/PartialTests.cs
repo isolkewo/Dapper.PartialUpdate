@@ -1,3 +1,5 @@
+using Xunit;
+
 namespace Dapper.PartialUpdate.Tests;
 
 public class PartialTests

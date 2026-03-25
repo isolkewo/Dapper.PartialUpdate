@@ -1,3 +1,5 @@
+using Xunit;
+
 namespace Dapper.PartialUpdate.Tests;
 
 public class DatabaseTypeTests
@@ -136,11 +138,7 @@ public class DatabaseTypeTests
     {
         return databaseType switch
         {
-            DatabaseType.SqlServer =>
-            {
-                var clean = identifier.Replace("]", "]]", StringComparison.Ordinal);
-                return $"[{clean}]";
-            },
+            DatabaseType.SqlServer => $"[{identifier.Replace("]", "]]", StringComparison.Ordinal)}]",
             DatabaseType.MySql => $"`{identifier.Replace("`", "``", StringComparison.Ordinal)}`",
             _ => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
         };

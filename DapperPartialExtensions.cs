@@ -77,6 +77,7 @@ public static class DapperPartialExtensions
     public static int UpdatePartials<T>(
         this IDbConnection connection,
         T entity,
+        DatabaseType databaseType = DatabaseType.SqlServer,
         IDbTransaction? transaction = null,
         int? commandTimeout = null)
         where T : class
@@ -84,7 +85,7 @@ public static class DapperPartialExtensions
         if (connection is null) throw new ArgumentNullException(nameof(connection));
         if (entity is null) throw new ArgumentNullException(nameof(entity));
 
-        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, DatabaseType.SqlServer));
+        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, databaseType));
         var keyValue = plan.KeyProp.GetValue(entity)
             ?? throw new InvalidOperationException($"Key value for '{plan.KeyProp.Name}' cannot be null on entity of type '{typeof(T).Name}'.");
 
@@ -124,6 +125,7 @@ public static class DapperPartialExtensions
     public static Task<int> UpdatePartialsAsync<T>(
         this IDbConnection connection,
         T entity,
+        DatabaseType databaseType = DatabaseType.SqlServer,
         IDbTransaction? transaction = null,
         int? commandTimeout = null)
         where T : class
@@ -131,7 +133,7 @@ public static class DapperPartialExtensions
         if (connection is null) throw new ArgumentNullException(nameof(connection));
         if (entity is null) throw new ArgumentNullException(nameof(entity));
 
-        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, DatabaseType.SqlServer));
+        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, databaseType));
         var keyValue = plan.KeyProp.GetValue(entity)
             ?? throw new InvalidOperationException($"Key value for '{plan.KeyProp.Name}' cannot be null on entity of type '{typeof(T).Name}'.");
 
@@ -172,6 +174,7 @@ public static class DapperPartialExtensions
     public static int InsertPartials<T>(
         this IDbConnection connection,
         T entity,
+        DatabaseType databaseType = DatabaseType.SqlServer,
         IDbTransaction? transaction = null,
         int? commandTimeout = null)
         where T : class
@@ -179,7 +182,7 @@ public static class DapperPartialExtensions
         if (connection is null) throw new ArgumentNullException(nameof(connection));
         if (entity is null) throw new ArgumentNullException(nameof(entity));
 
-        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, DatabaseType.SqlServer));
+        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, databaseType));
         var parameters = new DynamicParameters();
         var columns = new List<string>();
         var valueParams = new List<string>();
@@ -206,7 +209,56 @@ public static class DapperPartialExtensions
             sql = $"INSERT INTO {plan.QualifiedTableName} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", valueParams)});";
         }
 
-        return connection.Execute(sql, parameters, transaction, commandTimeout);
+        connection.Execute(sql, parameters, transaction, commandTimeout);
+        
+        // Retrieve the auto-generated ID and set it on the entity
+        var keyColumnName = plan.KeyColumnName;
+        var keyPropType = plan.KeyProp.PropertyType;
+        
+        // Get the last inserted ID based on database type
+        object? insertedId = databaseType switch
+        {
+            DatabaseType.SqlServer => connection.QuerySingle<decimal>(
+                $"SELECT SCOPE_IDENTITY()", 
+                null, 
+                transaction),
+            DatabaseType.MySql => connection.QuerySingle<long>(
+                $"SELECT LAST_INSERT_ID()", 
+                null, 
+                transaction),
+            _ => connection.QuerySingle<long>(
+                $"SELECT last_insert_rowid()", 
+                null, 
+                transaction)
+        };
+        
+        // Set the ID on the entity if we got a value
+        if (insertedId != null)
+        {
+            // Convert to the correct type based on the key property type
+            object? convertedId = insertedId switch
+            {
+                long l => keyPropType == typeof(int) ? (object)Convert.ToInt32(l) : 
+                          keyPropType == typeof(long) ? (object)l :
+                          keyPropType == typeof(short) ? (object)Convert.ToInt16(l) :
+                          keyPropType == typeof(byte) ? (object)Convert.ToByte(l) :
+                          keyPropType == typeof(uint) ? (object)Convert.ToUInt32(l) :
+                          keyPropType == typeof(ulong) ? (object)Convert.ToUInt64(l) :
+                          l,
+                decimal d => keyPropType == typeof(int) ? (object)Convert.ToInt32(d) :
+                             keyPropType == typeof(long) ? (object)Convert.ToInt64(d) :
+                             keyPropType == typeof(decimal) ? (object)d :
+                             d,
+                int i => keyPropType == typeof(int) ? (object)i :
+                         keyPropType == typeof(long) ? (object)Convert.ToInt64(i) :
+                         i,
+                _ => insertedId
+            };
+            
+            plan.KeyProp.SetValue(entity, convertedId);
+        }
+        
+        return 1;
     }
 
     /// <summary>
@@ -221,9 +273,10 @@ public static class DapperPartialExtensions
     /// <returns>A task representing the asynchronous operation. The result is the number of rows affected.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="connection"/> or <paramref name="entity"/> is null.</exception>
     /// <exception cref="InvalidOperationException">Thrown when no key property is found.</exception>
-    public static Task<int> InsertPartialsAsync<T>(
+    public static async Task<int> InsertPartialsAsync<T>(
         this IDbConnection connection,
         T entity,
+        DatabaseType databaseType = DatabaseType.SqlServer,
         IDbTransaction? transaction = null,
         int? commandTimeout = null)
         where T : class
@@ -231,7 +284,7 @@ public static class DapperPartialExtensions
         if (connection is null) throw new ArgumentNullException(nameof(connection));
         if (entity is null) throw new ArgumentNullException(nameof(entity));
 
-        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, DatabaseType.SqlServer));
+        var plan = PlanCache.GetOrAdd(typeof(T), type => BuildPlan(type, databaseType));
         var parameters = new DynamicParameters();
         var columns = new List<string>();
         var valueParams = new List<string>();
@@ -258,7 +311,55 @@ public static class DapperPartialExtensions
             sql = $"INSERT INTO {plan.QualifiedTableName} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", valueParams)});";
         }
 
-        return connection.ExecuteAsync(sql, parameters, transaction, commandTimeout);
+        await connection.ExecuteAsync(sql, parameters, transaction, commandTimeout);
+        
+        // Retrieve the auto-generated ID and set it on the entity
+        var keyPropType = plan.KeyProp.PropertyType;
+        
+        // Get the last inserted ID based on database type
+        object? insertedId = databaseType switch
+        {
+            DatabaseType.SqlServer => await connection.QuerySingleAsync<decimal>(
+                $"SELECT SCOPE_IDENTITY()", 
+                null, 
+                transaction),
+            DatabaseType.MySql => await connection.QuerySingleAsync<long>(
+                $"SELECT LAST_INSERT_ID()", 
+                null, 
+                transaction),
+            _ => await connection.QuerySingleAsync<long>(
+                $"SELECT last_insert_rowid()", 
+                null, 
+                transaction)
+        };
+        
+        // Set the ID on the entity if we got a value
+        if (insertedId != null)
+        {
+            // Convert to the correct type based on the key property type
+            object? convertedId = insertedId switch
+            {
+                long l => keyPropType == typeof(int) ? (object)Convert.ToInt32(l) : 
+                          keyPropType == typeof(long) ? (object)l :
+                          keyPropType == typeof(short) ? (object)Convert.ToInt16(l) :
+                          keyPropType == typeof(byte) ? (object)Convert.ToByte(l) :
+                          keyPropType == typeof(uint) ? (object)Convert.ToUInt32(l) :
+                          keyPropType == typeof(ulong) ? (object)Convert.ToUInt64(l) :
+                          l,
+                decimal d => keyPropType == typeof(int) ? (object)Convert.ToInt32(d) :
+                             keyPropType == typeof(long) ? (object)Convert.ToInt64(d) :
+                             keyPropType == typeof(decimal) ? (object)d :
+                             d,
+                int i => keyPropType == typeof(int) ? (object)i :
+                         keyPropType == typeof(long) ? (object)Convert.ToInt64(i) :
+                         i,
+                _ => insertedId
+            };
+            
+            plan.KeyProp.SetValue(entity, convertedId);
+        }
+        
+        return 1;
     }
 
     private static EntityPlan BuildPlan(Type entityType, DatabaseType databaseType = DatabaseType.SqlServer)
@@ -347,11 +448,7 @@ public static class DapperPartialExtensions
     {
         return databaseType switch
         {
-            DatabaseType.SqlServer =>
-            {
-                var clean = identifier.Replace("]", "]]", StringComparison.Ordinal);
-                return $"[{clean}]";
-            },
+            DatabaseType.SqlServer => $"[{identifier.Replace("]", "]]", StringComparison.Ordinal)}]",
             DatabaseType.MySql => $"`{identifier.Replace("`", "``", StringComparison.Ordinal)}`",
             _ => $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
         };

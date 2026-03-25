@@ -1,5 +1,8 @@
 using Microsoft.Data.Sqlite;
 using Dapper;
+using Xunit;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Dapper.PartialUpdate.Tests;
 
@@ -46,9 +49,9 @@ public class IntegrationTests : IDisposable
         Assert.Equal(1, rowsAffected);
 
         var inserted = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
-        Assert.Equal("John Doe", inserted.Name);
-        Assert.Equal(30, inserted.Age);
-        Assert.Null(inserted.Email);
+        Assert.Equal("John Doe", inserted.NameValue);
+        Assert.Equal(30L, inserted.AgeValue);
+        Assert.Null(inserted.EmailValue);
     }
 
     [Fact]
@@ -64,9 +67,9 @@ public class IntegrationTests : IDisposable
         Assert.Equal(1, rowsAffected);
 
         var inserted = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
-        Assert.Null(inserted.Name);
-        Assert.Null(inserted.Email);
-        Assert.Null(inserted.Age);
+        Assert.Null(inserted.NameValue);
+        Assert.Null(inserted.EmailValue);
+        Assert.Null(inserted.AgeValue);
     }
 
     [Fact]
@@ -85,9 +88,9 @@ public class IntegrationTests : IDisposable
         Assert.Equal(1, rowsAffected);
 
         var updated = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
-        Assert.Equal("Jane Updated", updated.Name);
-        Assert.Equal("jane@example.com", updated.Email); // Should remain unchanged
-        Assert.Equal(25, updated.Age); // Should remain unchanged
+        Assert.Equal("Jane Updated", updated.NameValue);
+        Assert.Equal("jane@example.com", updated.EmailValue); // Should remain unchanged
+        Assert.Equal(25L, updated.AgeValue); // Should remain unchanged
     }
 
     [Fact]
@@ -107,28 +110,27 @@ public class IntegrationTests : IDisposable
         Assert.Equal(1, rowsAffected);
 
         var updated = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
-        Assert.Equal("Bob", updated.Name); // Should remain unchanged
-        Assert.Equal("newbob@example.com", updated.Email);
-        Assert.Equal(41, updated.Age);
+        Assert.Equal("Bob", updated.NameValue); // Should remain unchanged
+        Assert.Equal("newbob@example.com", updated.EmailValue);
+        Assert.Equal(41L, updated.AgeValue);
     }
 
     [Fact]
     public void UpdatePartials_WithNoSetFields_ReturnsZero()
     {
-        // Arrange
-        _connection.Execute("INSERT INTO Users (Name, Email, Age) VALUES ('Alice', 'alice@example.com', 30)");
-
-        var user = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
+        // Arrange - Create a new user object with Id set but no Partial fields set
+        var user = new User { Id = 1 };
+        // Note: Name, Email, Age are not set (their Partial wrappers are default/unset)
 
         // Act
         var rowsAffected = _connection.UpdatePartials(user, DatabaseType.Standard);
 
-        // Assert
+        // Assert - No fields were set, so 0 rows should be affected
         Assert.Equal(0, rowsAffected);
     }
 
     [Fact]
-    public void InsertPartialsAsync_WithSomeFields_InsertsOnlySetFields()
+    public async Task InsertPartialsAsync_WithSomeFields_InsertsOnlySetFields()
     {
         // Arrange
         var user = new User();
@@ -142,13 +144,13 @@ public class IntegrationTests : IDisposable
         Assert.Equal(1, rowsAffected);
 
         var inserted = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
-        Assert.Equal("Async User", inserted.Name);
-        Assert.Equal("async@example.com", inserted.Email);
-        Assert.Null(inserted.Age);
+        Assert.Equal("Async User", inserted.NameValue);
+        Assert.Equal("async@example.com", inserted.EmailValue);
+        Assert.Null(inserted.AgeValue);
     }
 
     [Fact]
-    public void UpdatePartialsAsync_UpdatesOnlySetFields()
+    public async Task UpdatePartialsAsync_UpdatesOnlySetFields()
     {
         // Arrange
         _connection.Execute("INSERT INTO Users (Name, Email, Age) VALUES ('Sync', 'sync@example.com', 50)");
@@ -157,14 +159,14 @@ public class IntegrationTests : IDisposable
         user.Name = "Sync Updated";
 
         // Act
-        var rowsAffected = _connection.UpdatePartialsAsync(user, DatabaseType.Standard);
+        var rowsAffected = await _connection.UpdatePartialsAsync(user, DatabaseType.Standard);
 
         // Assert
-        Assert.Equal(1, rowsAffected.Result);
+        Assert.Equal(1, rowsAffected);
 
         var updated = _connection.QuerySingle<User>("SELECT * FROM Users WHERE Id = 1");
-        Assert.Equal("Sync Updated", updated.Name);
-        Assert.Equal("sync@example.com", updated.Email);
+        Assert.Equal("Sync Updated", updated.NameValue);
+        Assert.Equal("sync@example.com", updated.EmailValue);
     }
 }
 
@@ -176,10 +178,10 @@ public class User
 
     public Partial<string> Name { get; set; }
     public Partial<string> Email { get; set; }
-    public Partial<int> Age { get; set; }
+    public Partial<long> Age { get; set; }
 
     // Helper properties for reading values in tests
     public string? NameValue => Name.IsSet ? Name.Value : null;
     public string? EmailValue => Email.IsSet ? Email.Value : null;
-    public int? AgeValue => Age.IsSet ? Age.Value : (int?)null;
+    public long? AgeValue => Age.IsSet ? Age.Value : null;
 }
